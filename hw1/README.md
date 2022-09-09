@@ -1,3 +1,13 @@
+Command to run the homework:
+
+python train.py --hidden_size=150 --in_data_fn=lang_to_sem_data.json --model_output_dir=experiments/lstm --batch_size=100 --learning_rate=0.1 --num_epochs=3 --val_every=1 --embedding_dim=80
+
+The report write up is available in this directory: Report.pdf.
+
+
+
+
+
 
 # Coding Assignment #1
 
