@@ -1,3 +1,6 @@
+hw1/.idea
+hw2/books/*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

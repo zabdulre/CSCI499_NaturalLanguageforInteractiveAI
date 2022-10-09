@@ -2,8 +2,8 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="74fc3675-bb9a-447d-9ba7-5b6a3def0c32" name="Default Changelist" comment="">
-      <change beforePath="$PROJECT_DIR$/model.py" beforeDir="false" afterPath="$PROJECT_DIR$/model.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/train.py" beforeDir="false" afterPath="$PROJECT_DIR$/train.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/../.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/../.gitignore" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -63,7 +63,7 @@
       <option name="ADD_SOURCE_ROOTS" value="true" />
       <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
       <option name="SCRIPT_NAME" value="$PROJECT_DIR$/train.py" />
-      <option name="PARAMETERS" value="--hidden_size=150 --in_data_fn=lang_to_sem_data.json --model_output_dir=experiments/lstm --batch_size=100 --learning_rate=0.1 --num_epochs=9 --val_every=2 --embedding_dim=80" />
+      <option name="PARAMETERS" value="--hidden_size=150 --in_data_fn=lang_to_sem_data.json --model_output_dir=experiments/lstm --batch_size=100 --learning_rate=0.1 --num_epochs=3 --val_every=1 --embedding_dim=80" />
       <option name="SHOW_COMMAND_LINE" value="true" />
       <option name="EMULATE_TERMINAL" value="false" />
       <option name="MODULE_MODE" value="false" />
@@ -105,7 +105,7 @@
       <workItem from="1661820207020" duration="851000" />
       <workItem from="1661836184714" duration="6480000" />
       <workItem from="1661967936120" duration="687000" />
-      <workItem from="1662163423261" duration="92179000" />
+      <workItem from="1662163423261" duration="97580000" />
     </task>
     <servers />
   </component>
