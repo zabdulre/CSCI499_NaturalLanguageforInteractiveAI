@@ -1,8 +1,11 @@
 import argparse
 import os
+
+import numpy as np
 import tqdm
 import torch
 from sklearn.metrics import accuracy_score
+from torch.utils import data
 
 from eval_utils import downstream_validation
 import utils
@@ -44,11 +47,46 @@ def setup_dataloader(args):
     # (you can use utils functions) and create respective
     # dataloaders.
     # ===================================================== #
+    lenContext = args.len_context
+    lenContextLeft = lenContext // 2  # The model will look one extra to the right of the word if the context length is odd
+    padding_token = vocab_to_index['<pad>']
+    listOfContext = np.zeros((numberOfExamples(encoded_sentences), lenContext), dtype=np.int32)
+    listOfWords = np.zeros((numberOfExamples(encoded_sentences), 1), dtype=np.int32)
+    exampleNumber = 0
 
-    train_loader = None
-    val_loader = None
+    for sentence, length in zip(encoded_sentences, lens):
+        for word, i in zip(sentence, range(length[0])):
+            index = 0
+            for j in range(lenContext + 1):  # plus one so that we can skip the word itself
+                if (j - lenContextLeft) == 0:
+                    continue
+                elif j + i < lenContextLeft:
+                    listOfContext[exampleNumber][index] = padding_token
+                    index += 1
+                elif (j + i + 1 - lenContextLeft) >= length[0]:
+                    listOfContext[exampleNumber][index] = padding_token
+                    index += 1
+                else:
+                    listOfContext[exampleNumber][index] = sentence[j + i - lenContextLeft]
+                    index += 1
+            listOfWords[exampleNumber][0] = word
+            exampleNumber += 1
+
+    # for a given sentence loop through the words
+    # for each word, add the surrounding context to one list
+    dataset = torch.utils.data.TensorDataset(torch.from_numpy(listOfContext), torch.from_numpy(listOfWords))
+
+    tSize = int(0.80 * len(dataset))
+    vSize = len(dataset) - tSize
+    train_processed, val_processed = torch.utils.data.random_split(dataset, [tSize, vSize], generator=torch.Generator().manual_seed(21))
+
+    train_loader = torch.utils.data.DataLoader(train_processed, shuffle=True, batch_size=args.batch_size)
+    val_loader = torch.utils.data.DataLoader(val_processed,
+                                             shuffle=True, batch_size=args.batch_size)
     return train_loader, val_loader
 
+def numberOfExamples(encoded_sentences):
+    return encoded_sentences.shape[0] * encoded_sentences.shape[1]
 
 def setup_model(args):
     """
@@ -78,13 +116,13 @@ def setup_optimizer(args, model):
 
 
 def train_epoch(
-    args,
-    model,
-    loader,
-    optimizer,
-    criterion,
-    device,
-    training=True,
+        args,
+        model,
+        loader,
+        optimizer,
+        criterion,
+        device,
+        training=True,
 ):
     model.train()
     epoch_loss = 0.0
@@ -210,7 +248,6 @@ def main(args):
             # evaluate learned embeddings on a downstream task
             downstream_validation(word_vec_file, external_val_analogies)
 
-
         if epoch % args.save_every == 0:
             ckpt_file = os.path.join(args.output_dir, "model.ckpt")
             print("saving model to ", ckpt_file)
@@ -267,6 +304,8 @@ if __name__ == "__main__":
     # Task (optional): Add any additional command line
     # parameters you may need here
     # ===================================================== #
-
+    parser.add_argument(
+        "--len_context", type=int, default=5, help="How much to the left, right the model should look"
+    )
     args = parser.parse_args()
     main(args)
