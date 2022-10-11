@@ -10,7 +10,7 @@ from torch.utils import data
 from eval_utils import downstream_validation
 import utils
 import data_utils
-
+from model import LanguageModel
 
 def setup_dataloader(args):
     """
@@ -50,7 +50,7 @@ def setup_dataloader(args):
     lenContext = args.len_context
     lenContextLeft = lenContext // 2  # The model will look one extra to the right of the word if the context length is odd
     padding_token = vocab_to_index['<pad>']
-    listOfContext = np.zeros((numberOfExamples(encoded_sentences), lenContext), dtype=np.int32)
+    listOfContext = np.zeros((numberOfExamples(encoded_sentences), args.vocab_size), dtype=np.int32)
     listOfWords = np.zeros((numberOfExamples(encoded_sentences), 1), dtype=np.int32)
     exampleNumber = 0
 
@@ -61,34 +61,37 @@ def setup_dataloader(args):
                 if (j - lenContextLeft) == 0:
                     continue
                 elif j + i < lenContextLeft:
-                    listOfContext[exampleNumber][index] = padding_token
+                    listOfContext[exampleNumber][padding_token] = 1
                     index += 1
                 elif (j + i + 1 - lenContextLeft) >= length[0]:
-                    listOfContext[exampleNumber][index] = padding_token
+                    listOfContext[exampleNumber][padding_token] = 1
                     index += 1
                 else:
-                    listOfContext[exampleNumber][index] = sentence[j + i - lenContextLeft]
+                    listOfContext[exampleNumber][sentence[j + i - lenContextLeft]] = 1
                     index += 1
             listOfWords[exampleNumber][0] = word
             exampleNumber += 1
 
     # for a given sentence loop through the words
     # for each word, add the surrounding context to one list
-    dataset = torch.utils.data.TensorDataset(torch.from_numpy(listOfContext), torch.from_numpy(listOfWords))
+    dataset = torch.utils.data.TensorDataset(torch.from_numpy(listOfWords), torch.from_numpy(listOfContext))
 
     tSize = int(0.80 * len(dataset))
     vSize = len(dataset) - tSize
-    train_processed, val_processed = torch.utils.data.random_split(dataset, [tSize, vSize], generator=torch.Generator().manual_seed(21))
+    train_processed, val_processed = torch.utils.data.random_split(dataset, [tSize, vSize],
+                                                                   generator=torch.Generator().manual_seed(21))
 
     train_loader = torch.utils.data.DataLoader(train_processed, shuffle=True, batch_size=args.batch_size)
     val_loader = torch.utils.data.DataLoader(val_processed,
                                              shuffle=True, batch_size=args.batch_size)
     return train_loader, val_loader
 
+
 def numberOfExamples(encoded_sentences):
     return encoded_sentences.shape[0] * encoded_sentences.shape[1]
 
-def setup_model(args):
+
+def setup_model(args, device):
     """
     return:
         - model: YourOwnModelClass
@@ -96,7 +99,7 @@ def setup_model(args):
     # ================== TODO: CODE HERE ================== #
     # Task: Initialize your CBOW or Skip-Gram model.
     # ===================================================== #
-    model = None
+    model = LanguageModel(device, args.embedding_dim, args.vocab_size)
     return model
 
 
@@ -110,8 +113,8 @@ def setup_optimizer(args, model):
     # Task: Initialize the loss function for predictions. 
     # Also initialize your optimizer.
     # ===================================================== #
-    criterion = None
-    optimizer = None
+    criterion = torch.nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     return criterion, optimizer
 
 
@@ -135,11 +138,11 @@ def train_epoch(
     # NOTE: you may have additional outputs from the loader __getitem__, you can modify this
     for (inputs, labels) in tqdm.tqdm(loader):
         # put model inputs to device
-        inputs, labels = inputs.to(device).long(), labels.to(device).long()
+        inputs, labels = inputs.to(device).long(), labels.to(device).float()
 
         # calculate the loss and train accuracy and perform backprop
         # NOTE: feel free to change the parameters to the model forward pass here + outputs
-        pred_logits = model(inputs, labels)
+        pred_logits = model(inputs)
 
         # calculate prediction loss
         loss = criterion(pred_logits.squeeze(), labels)
@@ -154,7 +157,7 @@ def train_epoch(
         epoch_loss += loss.item()
 
         # compute metrics
-        preds = pred_logits.argmax(-1)
+        preds = torch.as_tensor(pred_logits > 0.0, dtype=torch.int32).squeeze()
         pred_labels.extend(preds.cpu().numpy())
         target_labels.extend(labels.cpu().numpy())
 
@@ -200,7 +203,7 @@ def main(args):
     loaders = {"train": train_loader, "val": val_loader}
 
     # build model
-    model = setup_model(args)
+    model = setup_model(args, device)
     print(model)
 
     # get optimizer
@@ -239,14 +242,14 @@ def main(args):
             # later or you get bored and kill the process you'll still
             # have a word vector file and some results.
             # ===================================================== #
+        #do it after training
+        # save word vectors
+        word_vec_file = os.path.join(args.outputs_dir, args.word_vector_fn)
+        print("saving word vec to ", word_vec_file)
+        utils.save_word2vec_format(word_vec_file, model, i2v)
 
-            # save word vectors
-            word_vec_file = os.path.join(args.outputs_dir, args.word_vector_fn)
-            print("saving word vec to ", word_vec_file)
-            utils.save_word2vec_format(word_vec_file, model, i2v)
-
-            # evaluate learned embeddings on a downstream task
-            downstream_validation(word_vec_file, external_val_analogies)
+        # evaluate learned embeddings on a downstream task
+        downstream_validation(word_vec_file, external_val_analogies)
 
         if epoch % args.save_every == 0:
             ckpt_file = os.path.join(args.output_dir, "model.ckpt")
@@ -256,7 +259,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", type=str, help="where to save training outputs")
+    parser.add_argument("--outputs_dir", type=str, help="where to save training outputs")
     parser.add_argument("--data_dir", type=str, help="where the book dataset is stored")
     parser.add_argument(
         "--downstream_eval",
@@ -306,6 +309,12 @@ if __name__ == "__main__":
     # ===================================================== #
     parser.add_argument(
         "--len_context", type=int, default=5, help="How much to the left, right the model should look"
+    )
+    parser.add_argument(
+        "--learning_rate", type=float, default=0.01, help="Learning rate used for the optimizer"
+    )
+    parser.add_argument(
+        "--embedding_dim", type=int, default=5, help="Embedding dimension used as input to the fully connected layer"
     )
     args = parser.parse_args()
     main(args)
