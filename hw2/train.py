@@ -12,6 +12,7 @@ import utils
 import data_utils
 from model import LanguageModel
 
+
 def setup_dataloader(args):
     """
     return:
@@ -50,41 +51,58 @@ def setup_dataloader(args):
     lenContext = args.len_context
     lenContextLeft = lenContext // 2  # The model will look one extra to the right of the word if the context length is odd
     padding_token = vocab_to_index['<pad>']
-    listOfContext = np.zeros((numberOfExamples(encoded_sentences), args.vocab_size), dtype=np.int32)
-    listOfWords = np.zeros((numberOfExamples(encoded_sentences), 1), dtype=np.int32)
-    exampleNumber = 0
+    end_token = vocab_to_index['<end>']
+    # listOfContext = np.zeros((numberOfExamples(encoded_sentences), args.vocab_size), dtype=np.int32)
+    # listOfWords = np.zeros((numberOfExamples(encoded_sentences), 1), dtype=np.int32)
+    exampleNumber = -1
+    contextArr = []
+    wordArr = []
 
     for sentence, length in zip(encoded_sentences, lens):
         for word, i in zip(sentence, range(length[0])):
             index = 0
+            first = True
             for j in range(lenContext + 1):  # plus one so that we can skip the word itself
                 if (j - lenContextLeft) == 0:
                     continue
                 elif j + i < lenContextLeft:
-                    listOfContext[exampleNumber][padding_token] = 1
-                    index += 1
-                elif (j + i + 1 - lenContextLeft) >= length[0]:
-                    listOfContext[exampleNumber][padding_token] = 1
-                    index += 1
+                    break
+                    # contextArr[exampleNumber].append(padding_token)
+                    # index += 1
+                elif (i + (lenContext - lenContextLeft) + 1) >= length[0]:
+                    break
+                    # contextArr[exampleNumber].append(padding_token)
+                    # index += 1
                 else:
-                    listOfContext[exampleNumber][sentence[j + i - lenContextLeft]] = 1
+                    if first:
+                        contextArr.append([])
+                        wordArr.append([word])
+                        exampleNumber += 1
+                    first = False
+                    contextArr[exampleNumber].append(sentence[j + i - lenContextLeft])
                     index += 1
-            listOfWords[exampleNumber][0] = word
-            exampleNumber += 1
+            if word == end_token:
+                break
 
+    # listOfContext = [np.array(i) for i in contextArr]
+    listOfContext = np.array(contextArr)
+    listOfWords = np.array(wordArr)
     # for a given sentence loop through the words
     # for each word, add the surrounding context to one list
     dataset = torch.utils.data.TensorDataset(torch.from_numpy(listOfWords), torch.from_numpy(listOfContext))
+    # dataset, _ = torch.utils.data.random_split(dataset, [int(len(dataset) * 0.005), (len(dataset) - int(len(dataset) * 0.005))],
+    # generator=torch.Generator().manual_seed(21))
 
-    tSize = int(0.80 * len(dataset))
+    tSize = int(0.8 * len(dataset))
     vSize = len(dataset) - tSize
     train_processed, val_processed = torch.utils.data.random_split(dataset, [tSize, vSize],
                                                                    generator=torch.Generator().manual_seed(21))
 
-    train_loader = torch.utils.data.DataLoader(train_processed, shuffle=True, batch_size=args.batch_size)
+    train_loader = torch.utils.data.DataLoader(train_processed, shuffle=True, batch_size=args.batch_size,
+                                               drop_last=True)
     val_loader = torch.utils.data.DataLoader(val_processed,
-                                             shuffle=True, batch_size=args.batch_size)
-    return train_loader, val_loader
+                                             shuffle=True, batch_size=args.batch_size, drop_last=True)
+    return train_loader, val_loader, index_to_vocab
 
 
 def numberOfExamples(encoded_sentences):
@@ -99,7 +117,7 @@ def setup_model(args, device):
     # ================== TODO: CODE HERE ================== #
     # Task: Initialize your CBOW or Skip-Gram model.
     # ===================================================== #
-    model = LanguageModel(device, args.embedding_dim, args.vocab_size)
+    model = LanguageModel(device, args.embedding_dim, args.vocab_size, args.len_context)
     return model
 
 
@@ -125,6 +143,7 @@ def train_epoch(
         optimizer,
         criterion,
         device,
+        i2v,
         training=True,
 ):
     model.train()
@@ -133,10 +152,21 @@ def train_epoch(
     # keep track of the model predictions for computing accuracy
     pred_labels = []
     target_labels = []
-
+    acc = 0
+    trainIndex = 0
     # iterate over each batch in the dataloader
     # NOTE: you may have additional outputs from the loader __getitem__, you can modify this
     for (inputs, labels) in tqdm.tqdm(loader):
+        trainIndex += 1
+        newLabels = torch.zeros((args.batch_size, args.vocab_size), dtype=torch.int32)
+
+        index = 0
+        for i in labels:
+            for j in i:
+                newLabels[index][j] = 1
+            index += 1
+
+        labels = newLabels
         # put model inputs to device
         inputs, labels = inputs.to(device).long(), labels.to(device).float()
 
@@ -158,16 +188,16 @@ def train_epoch(
 
         # compute metrics
         preds = torch.as_tensor(pred_logits > 0.0, dtype=torch.int32).squeeze()
-        pred_labels.extend(preds.cpu().numpy())
-        target_labels.extend(labels.cpu().numpy())
+        acc += accuracy_score(preds.cpu().numpy(), newLabels.cpu().numpy())
 
-    acc = accuracy_score(pred_labels, target_labels)
+    # acc = accuracy_score(pred_labels, target_labels)
+    acc /= trainIndex
     epoch_loss /= len(loader)
 
     return epoch_loss, acc
 
 
-def validate(args, model, loader, optimizer, criterion, device):
+def validate(args, model, loader, optimizer, criterion, device, i2v):
     # set model to eval mode
     model.eval()
 
@@ -180,6 +210,7 @@ def validate(args, model, loader, optimizer, criterion, device):
             optimizer,
             criterion,
             device,
+            i2v,
             training=False,
         )
 
@@ -199,7 +230,7 @@ def main(args):
         return
 
     # get dataloaders
-    train_loader, val_loader = setup_dataloader(args)
+    train_loader, val_loader, i2v = setup_dataloader(args)
     loaders = {"train": train_loader, "val": val_loader}
 
     # build model
@@ -219,9 +250,15 @@ def main(args):
             optimizer,
             criterion,
             device,
+            i2v
         )
-
         print(f"train loss : {train_loss} | train acc: {train_acc}")
+
+        # do it after training
+        # save word vectors
+        word_vec_file = os.path.join(args.outputs_dir, args.word_vector_fn)
+        print("saving word vec to ", word_vec_file)
+        utils.save_word2vec_format(word_vec_file, model, i2v)
 
         if epoch % args.val_every == 0:
             val_loss, val_acc = validate(
@@ -231,6 +268,7 @@ def main(args):
                 optimizer,
                 criterion,
                 device,
+                i2v
             )
             print(f"val loss : {val_loss} | val acc: {val_acc}")
 
@@ -242,17 +280,12 @@ def main(args):
             # later or you get bored and kill the process you'll still
             # have a word vector file and some results.
             # ===================================================== #
-        #do it after training
-        # save word vectors
-        word_vec_file = os.path.join(args.outputs_dir, args.word_vector_fn)
-        print("saving word vec to ", word_vec_file)
-        utils.save_word2vec_format(word_vec_file, model, i2v)
 
         # evaluate learned embeddings on a downstream task
         downstream_validation(word_vec_file, external_val_analogies)
 
         if epoch % args.save_every == 0:
-            ckpt_file = os.path.join(args.output_dir, "model.ckpt")
+            ckpt_file = os.path.join(args.outputs_dir, "model.ckpt")
             print("saving model to ", ckpt_file)
             torch.save(model, ckpt_file)
 
@@ -278,7 +311,7 @@ if __name__ == "__main__":
         "--vocab_size", type=int, default=3000, help="size of vocabulary"
     )
     parser.add_argument(
-        "--batch_size", type=int, default=32, help="size of each batch in loader"
+        "--batch_size", type=int, default=128, help="size of each batch in loader"
     )
     parser.add_argument("--force_cpu", action="store_true", help="debug mode")
     parser.add_argument(
@@ -289,7 +322,7 @@ if __name__ == "__main__":
         default='learned_word_vectors.txt'
     )
     parser.add_argument(
-        "--num_epochs", default=30, type=int, help="number of training epochs"
+        "--num_epochs", default=3, type=int, help="number of training epochs"
     )
     parser.add_argument(
         "--val_every",

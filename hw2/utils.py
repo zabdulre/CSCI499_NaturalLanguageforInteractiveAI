@@ -11,7 +11,7 @@ def read_analogies(analogies_fn):
 
 def save_word2vec_format(fname, model, i2v):
     print("Saving word vectors to file...")  # DEBUG
-    with gensim.utils.smart_open(fname, "wb") as fout:
+    with gensim.utils.open(fname, "wb") as fout:
         fout.write(
             gensim.utils.to_utf8("%d %d\n" % (model.vocab_size, model.embedding_dim))
         )
