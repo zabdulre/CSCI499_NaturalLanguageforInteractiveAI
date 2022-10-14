@@ -1,8 +1,8 @@
 ﻿Zaid Abdulrehman
-Professor Jesse Thomason 
-Csci 499 Natural Language Processing
-13 October 2022
-Hw #2: Skip-gram Model
+ Professor Jesse Thomason 
+ Csci 499 Natural Language Processing
+ 13 October 2022
+ 								Hw #2: Skip-gram Model
 How To Run
 https://github.com/zabdulre/CSCI499_NaturalLanguageforInteractiveAI/tree/main/hw2
 Please be sure to add the data directory before running. Please note, the context length refers to the total of left and right context combined. datadirectory2 stores the implemented model. datadirectory stores the short context, extra credit, model
