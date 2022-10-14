@@ -187,14 +187,26 @@ def train_epoch(
         epoch_loss += loss.item()
 
         # compute metrics
-        preds = torch.as_tensor(pred_logits > 0.0, dtype=torch.int32).squeeze()
-        acc += accuracy_score(preds.cpu().numpy(), newLabels.cpu().numpy())
+        # preds = torch.as_tensor(pred_logits > 0.0, dtype=torch.int32).squeeze()
+        preds = torch.topk(pred_logits, args.len_context, dim=2).indices.squeeze()
+        acc += iou_accuracy(preds.cpu(), labels.cpu(), args)
 
     # acc = accuracy_score(pred_labels, target_labels)
     acc /= trainIndex
     epoch_loss /= len(loader)
 
     return epoch_loss, acc
+
+
+def iou_accuracy(preds, labels, args):
+    intersection = 0
+    index = 0
+    for i in preds:
+        for j in i:
+            if labels[index][j] == 1:
+                intersection += 1
+        index += 1
+    return intersection / (args.len_context * args.batch_size)
 
 
 def validate(args, model, loader, optimizer, criterion, device, i2v):
@@ -311,7 +323,8 @@ if __name__ == "__main__":
         "--vocab_size", type=int, default=3000, help="size of vocabulary"
     )
     parser.add_argument(
-        "--batch_size", type=int, default=128, help="size of each batch in loader"
+        "--batch_size", type=int, default=128
+        , help="size of each batch in loader"
     )
     parser.add_argument("--force_cpu", action="store_true", help="debug mode")
     parser.add_argument(
@@ -326,7 +339,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--val_every",
-        default=5,
+        default=1,
         type=int,
         help="number of epochs between every eval loop",
     )
