@@ -31,39 +31,48 @@ def preprocess_string(s):
     return s
 
 
-def build_tokenizer_table(train, vocab_size=1000):
+def build_tokenizer_table(train, vocab_size=500):
     word_list = []
     padded_lens = []
     inst_count = 0
+    maxEpisodeLength = 0
     for episode in train:
+        padded_len = 2  # start/end
+        episodeLength = 0
         for inst, _ in episode:
             inst = preprocess_string(inst)
-            padded_len = 2  # start/end
             for word in inst.lower().split():
                 if len(word) > 0:
                     word_list.append(word)
                     padded_len += 1
-            padded_lens.append(padded_len)
+            episodeLength += 1
+        padded_lens.append(padded_len)
+        if episodeLength > maxEpisodeLength:
+            maxEpisodeLength = episodeLength
     corpus = Counter(word_list)
     corpus_ = sorted(corpus, key=corpus.get, reverse=True)[
         : vocab_size - 4
     ]  # save room for <pad>, <start>, <end>, and <unk>
-    vocab_to_index = {w: i + 4 for i, w in enumerate(corpus_)}
+    vocab_to_index = {w: i + 5 for i, w in enumerate(corpus_)}
     vocab_to_index["<pad>"] = 0
     vocab_to_index["<start>"] = 1
     vocab_to_index["<end>"] = 2
     vocab_to_index["<unk>"] = 3
+    vocab_to_index["<sep>"] = 4
     index_to_vocab = {vocab_to_index[w]: w for w in vocab_to_index}
     return (
         vocab_to_index,
         index_to_vocab,
         int(np.average(padded_lens) + np.std(padded_lens) * 2 + 0.5),
+        maxEpisodeLength
     )
 
 
-def build_output_tables(train):
+def build_output_tables(train, padToken):
     actions = set()
     targets = set()
+    actions.add(padToken)
+    targets.add(padToken)
     for episode in train:
         for _, outseq in episode:
             a, t = outseq

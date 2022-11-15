@@ -1,8 +1,13 @@
+import json
+
+import numpy as np
 import tqdm
 import torch
 import argparse
 from sklearn.metrics import accuracy_score
 
+import utils
+from model import EncoderDecoder
 from utils import (
     get_device,
     preprocess_string,
@@ -29,10 +34,103 @@ def setup_dataloader(args):
     # ===================================================== #
     train_loader = None
     val_loader = None
-    return train_loader, val_loader
+
+    # Load JSON file into a dictionary
+    file = open(args.in_data_fn)
+    rawData = json.load(file)
+
+    # split the data into a train set and validation set
+    trainRawData = rawData["train"]
+    validateRawData = rawData["valid_seen"]
+
+    # preprocess both sets and tokenize
+    vocab_to_index, index_to_vocab, maxLength, maxEpisodeLength = utils.build_tokenizer_table(trainRawData)
+
+    unkValue = vocab_to_index["<unk>"]
+    startValue = vocab_to_index["<start>"]
+    endValue = vocab_to_index["<end>"]
+    padValue = vocab_to_index["<pad>"]
+    sepValue = vocab_to_index["<sep>"]
+
+    action_to_index, label_to_index, target_to_index, index_to_target = build_output_tables(trainRawData, padValue)
+
+    # setup some utility variables
+
+    train_tokens, train_labels = __processTrainingSet__(trainRawData, vocab_to_index, action_to_index, target_to_index,
+                                                        startValue, endValue,
+                                                        unkValue, padValue, sepValue, maxLength, maxEpisodeLength)
+    train_processed = torch.utils.data.TensorDataset(torch.from_numpy(train_tokens[0:2000]), torch.from_numpy(train_labels[0:2000]))
+
+    val_tokens, val_labels = __processTrainingSet__(validateRawData, vocab_to_index, action_to_index, target_to_index,
+                                                    startValue, endValue,
+                                                    unkValue, padValue, sepValue, maxLength, maxEpisodeLength)
+    val_processed = torch.utils.data.TensorDataset(torch.from_numpy(val_tokens), torch.from_numpy(val_labels))
+
+    train_loader = torch.utils.data.DataLoader(train_processed, shuffle=True, batch_size=args.batch_size)
+    val_loader = torch.utils.data.DataLoader(val_processed,
+                                             shuffle=True, batch_size=args.batch_size)
+
+    return train_loader, val_loader, {"vocab": vocab_to_index, "action": action_to_index, "target": target_to_index,
+                                      "maxLength": maxLength, "maxEpisodeLength": maxEpisodeLength, "pad": padValue}
 
 
-def setup_model(args):
+def __processTrainingSet__(trainRawData, vocab_to_index, action_to_index, target_to_index, startValue, endValue,
+                           unkValue, padValue, sepValue, maxLength, maxEpisodeLength):
+    # loop through each example
+    processedTrainData = np.zeros((len(trainRawData), maxLength), dtype=np.int32)
+    processedLabelData = np.zeros((len(trainRawData), maxEpisodeLength, 2), dtype=np.int32)
+
+    taskIndex = 0
+
+    for episode in trainRawData:
+        wordIndex = 0
+        episodeIndex = 0
+        processedTrainData[taskIndex][0] = startValue
+        # processedLabelData[taskIndex][0][0] = startValue
+        # processedLabelData[taskIndex][0][1] = startValue
+        # episodeIndex += 1
+        for instance in episode:
+            labels = instance[1]
+            sentences = instance[0]
+            sentences = preprocess_string(sentences)
+
+            # tokenize the sentence
+            for word in sentences.split():
+                processedTrainData[taskIndex][wordIndex] = vocab_to_index.get(word, unkValue)
+                wordIndex += 1
+                if wordIndex >= maxLength:
+                    break
+            # tokenize the labels
+            processedLabelData[taskIndex][episodeIndex][0] = action_to_index.get(labels[0])
+            processedLabelData[taskIndex][episodeIndex][1] = target_to_index.get(labels[1])
+            episodeIndex += 1
+            wordIndex += 1
+            if wordIndex >= maxLength:
+                break
+            processedTrainData[taskIndex][wordIndex] = sepValue
+
+        if wordIndex < maxLength:
+            wordIndex += 1
+            if wordIndex < maxLength:
+                processedTrainData[taskIndex][wordIndex] = endValue
+            for i in range(maxLength - wordIndex):
+                processedTrainData[taskIndex][wordIndex] = padValue
+                wordIndex += 1
+        if episodeIndex < maxEpisodeLength:
+            #    episodeIndex += 1
+            #      if episodeIndex < maxEpisodeLength:
+            #            processedLabelData[taskIndex][0][0] = endValue
+            #             processedLabelData[taskIndex][0][1] = endValue
+            for i in range(maxEpisodeLength - episodeIndex):
+                processedLabelData[taskIndex][episodeIndex][0] = padValue
+                processedLabelData[taskIndex][episodeIndex][1] = padValue
+                episodeIndex += 1
+        taskIndex += 1
+
+    return processedTrainData, processedLabelData
+
+
+def setup_model(args, maps, device):
     """
     return:
         - model: YourOwnModelClass
@@ -54,11 +152,14 @@ def setup_model(args):
     # of feeding the model prediction into the recurrent model,
     # you will give the embedding of the target token.
     # ===================================================== #
-    model = None
+    vocab = maps["vocab"]
+    model = EncoderDecoder(args.batch_size, maps["maxLength"], len(maps["vocab"]), args.embedding_size,
+                           maps['maxEpisodeLength'], args.decoder_size, len(maps['action']), len(maps['target']),
+                           args.encoder_size, vocab['<end>'], vocab['<pad>'])
     return model
 
 
-def setup_optimizer(args, model):
+def setup_optimizer(args, model, maps):
     """
     return:
         - criterion: loss_fn
@@ -68,20 +169,22 @@ def setup_optimizer(args, model):
     # Task: Initialize the loss function for action predictions
     # and target predictions. Also initialize your optimizer.
     # ===================================================== #
-    criterion = None
-    optimizer = None
+    action_criterion = torch.nn.CrossEntropyLoss(ignore_index=maps['pad'])
+    target_criterion = torch.nn.CrossEntropyLoss(ignore_index=maps['pad'])
+    optimizer = torch.optim.Adam(model.parameters(), args.learning_rate)
 
-    return criterion, optimizer
+    return action_criterion, target_criterion, optimizer
 
 
 def train_epoch(
-    args,
-    model,
-    loader,
-    optimizer,
-    criterion,
-    device,
-    training=True,
+        args,
+        model,
+        loader,
+        optimizer,
+        actionCriterion,
+        targetCriterion,
+        device,
+        training=True,
 ):
     """
     # TODO: implement function for greedy decoding.
@@ -99,6 +202,7 @@ def train_epoch(
     # predictions against the ground truth.
     """
 
+    global prefix_em
     epoch_loss = 0.0
     epoch_acc = 0.0
 
@@ -110,10 +214,16 @@ def train_epoch(
 
         # calculate the loss and train accuracy and perform backprop
         # NOTE: feel free to change the parameters to the model forward pass here + outputs
-        output = model(inputs, labels)
+        actionOutputs, targetOutputs = model(inputs, labels)
 
-        loss = criterion(output.squeeze(), labels[:, 0].long())
+        actionLoss = 0
+        targetLoss = 0
 
+        actionLabels, targetLabels = torch.split(labels, (1, 1), dim=2)
+        actionLoss = actionCriterion(actionOutputs.swapaxes(1, 2), actionLabels.squeeze().long())
+        targetLoss = targetCriterion(targetOutputs.swapaxes(1, 2), targetLabels.squeeze().long())
+
+        loss = actionLoss + targetLoss
         # step optimizer and compute gradients during training
         if training:
             optimizer.zero_grad()
@@ -127,13 +237,13 @@ def train_epoch(
         # Feel free to change the input to these functions.
         """
         # TODO: add code to log these metrics
-        em = output == labels
-        prefix_em = prefix_em(output, labels)
-        acc = 0.0
+        # em = output == labels
+        # prefix_em = prefix_em(output, labels)
+        # acc = 0.0
 
         # logging
-        epoch_loss += loss.item()
-        epoch_acc += acc.item()
+        epoch_loss += targetLoss.item() + actionLoss.item()
+        epoch_acc += 0.0
 
     epoch_loss /= len(loader)
     epoch_acc /= len(loader)
@@ -141,7 +251,7 @@ def train_epoch(
     return epoch_loss, epoch_acc
 
 
-def validate(args, model, loader, optimizer, criterion, device):
+def validate(args, model, loader, optimizer, actionCriterion, targetCriterion, device):
     # set model to eval mode
     model.eval()
 
@@ -152,7 +262,8 @@ def validate(args, model, loader, optimizer, criterion, device):
             model,
             loader,
             optimizer,
-            criterion,
+            actionCriterion,
+            targetCriterion,
             device,
             training=False,
         )
@@ -160,7 +271,7 @@ def validate(args, model, loader, optimizer, criterion, device):
     return val_loss, val_acc
 
 
-def train(args, model, loaders, optimizer, criterion, device):
+def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, device):
     # Train model for a fixed number of epochs
     # In each epoch we compute loss on each sample in our dataset and update the model
     # weights via backpropagation
@@ -175,7 +286,8 @@ def train(args, model, loaders, optimizer, criterion, device):
             model,
             loaders["train"],
             optimizer,
-            criterion,
+            actionCriterion,
+            targetCriterion,
             device,
         )
 
@@ -191,7 +303,8 @@ def train(args, model, loaders, optimizer, criterion, device):
                 model,
                 loaders["val"],
                 optimizer,
-                criterion,
+                actionCriterion,
+                targetCriterion,
                 device,
             )
 
@@ -216,7 +329,7 @@ def main(args):
     print(model)
 
     # get optimizer and loss functions
-    criterion, optimizer = setup_optimizer(args, model)
+    actionCriterion, targetCriterion, optimizer = setup_optimizer(args, model, maps)
 
     if args.eval:
         val_loss, val_acc = validate(
@@ -224,11 +337,11 @@ def main(args):
             model,
             loaders["val"],
             optimizer,
-            criterion,
+            actionCriterion, targetCriterion,
             device,
         )
     else:
-        train(args, model, loaders, optimizer, criterion, device)
+        train(args, model, loaders, optimizer, actionCriterion, targetCriterion, device)
 
 
 if __name__ == "__main__":
@@ -240,11 +353,23 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch_size", type=int, default=32, help="size of each batch in loader"
     )
+    parser.add_argument(
+        "--learning_rate", type=float, default=0.01, help="size of each batch in loader"
+    )
+    parser.add_argument(
+        "--embedding_size", type=int, default=32, help="size of the encoder embeddings"
+    )
+    parser.add_argument(
+        "--decoder_size", type=int, default=32, help="size of the decoder hidden size"
+    )
+    parser.add_argument(
+        "--encoder_size", type=int, default=32, help="size of the decoder hidden size"
+    )
     parser.add_argument("--force_cpu", action="store_true", help="debug mode")
     parser.add_argument("--eval", action="store_true", help="run eval")
-    parser.add_argument("--num_epochs", default=1000, help="number of training epochs")
+    parser.add_argument("--num_epochs", type=int, default=1000, help="number of training epochs")
     parser.add_argument(
-        "--val_every", default=5, help="number of epochs between every eval loop"
+        "--val_every", default=5, type=int, help="number of epochs between every eval loop"
     )
 
     # ================== TODO: CODE HERE ================== #
