@@ -38,16 +38,13 @@ class Decoder(nn.Module):
     TODO: edit the forward pass arguments to suit your needs
     """
 
-    def __init__(self, batch_size, maxLength, embeddingSize, maxEpisodeLength, decoderHiddenSize, numberOfActions,
+    def __init__(self, batch_size, maxLength, maxEpisodeLength, decoderHiddenSize, numberOfActions,
                  numberOfTargets, vocabSize, padIdx):
         super().__init__()
         self.maxEpisodeLength = maxEpisodeLength
         self.batchSize = batch_size
-        self.embeddingSize = int(embeddingSize / 2) * 2  # round up to the next even number
+        self.embeddingSize = numberOfTargets + numberOfActions  # round up to the next even number
         self.decoderHiddenSize = decoderHiddenSize
-        self.embedding = nn.Embedding(vocabSize,
-                                      int(self.embeddingSize / 2),
-                                      padding_idx=padIdx)  # Half size so that we can concatenate later on
         self.lstm = nn.LSTM(self.embeddingSize, decoderHiddenSize, batch_first=True)
         self.fcAction = nn.Linear(self.decoderHiddenSize, numberOfActions)
         self.fcTarget = nn.Linear(self.decoderHiddenSize, numberOfTargets)
@@ -72,15 +69,8 @@ class Decoder(nn.Module):
     """
 
     # For the first word, the encoder hidden state is given as the first argument
-    def forward(self, encoderOutput, prevAction, prevTarget, prevH, prevC):
-        if encoderOutput is None:
-            prevActionEmbedding = self.embedding(prevAction)
-            prevTargetEmbedding = self.embedding(prevTarget)
-            prevEmbedded = torch.unsqueeze(torch.cat((prevActionEmbedding, prevTargetEmbedding)).flatten(), 0)
-        else:
-            prevEmbedded = encoderOutput
-            prevH = torch.zeros((1, self.decoderHiddenSize))
-            prevC = torch.zeros((1, self.decoderHiddenSize))
+    def forward(self, prevAction, prevTarget, prevH, prevC):
+        prevEmbedded = torch.unsqueeze(torch.cat((prevAction, prevTarget), 1).to(torch.float), 1)
 
         output, (x, y) = self.lstm(prevEmbedded, (prevH, prevC))
 
@@ -106,18 +96,21 @@ class EncoderDecoder(nn.Module):
         self.numberOfActions = numberOfActions
         self.numberOfTargets = numberOfTargets
         self.encoder = Encoder(vocabSize, embeddingSize, encoderHiddenSize, batch_size, padToken)
-        self.decoder = Decoder(batch_size, max_length, encoderHiddenSize, maxEpisodeLength, decoderHiddenSize,
+        self.decoder = Decoder(batch_size, max_length, maxEpisodeLength, encoderHiddenSize,
                                numberOfActions, numberOfTargets, vocabSize, padToken)
 
     # Must be given an array of words chosen, this can be used for teacher forcing or for greedy
     # Input is of shape (batch size, length of words), label is (batch size, max length of labels, 2)
-    def forward(self, input, labels=None):
+    def forward(self, input, labels=None, teacherForcing=True):
         encoding = self.getEncoding(input)
 
         if labels is None:
             decoding = self.getGreedyDecoding(encoding)
         else:
-            decoding = self.getTeacherForcedDecoding(encoding, labels)
+            if teacherForcing:
+                decoding = self.getTeacherForcedDecoding(encoding, labels)
+            else:
+                decoding = self.getGreedyDecoding(encoding)
 
         return decoding
 
@@ -136,30 +129,79 @@ class EncoderDecoder(nn.Module):
                 if word.item() == self.endToken:
                     break
         """
-        return encoding
+        return prevH, prevC
 
     def getGreedyDecoding(self, encoding):
-        word = None
-        # while word != self.endToken:
-        return 0
+        prevH = encoding[0]
+        prevC = encoding[1]
+        shapeOfActions = (self.batchSize, 1, 1)
+        shapeOfTargets = (self.batchSize, 1, 1)
+        currentAction = torch.nn.functional.one_hot(torch.zeros(shapeOfActions).to(torch.int64), self.numberOfActions).squeeze()
+        currentTarget = torch.nn.functional.one_hot(torch.zeros(shapeOfTargets).to(torch.int64), self.numberOfTargets).squeeze()
+        previousPredictedAction = None
+        previousPredictedTarget = None
+        for i in range(self.maxEpisodeLength):
+            predictedAction, predictedTarget, (prevH, prevC)= self.decoder.forward(currentAction, currentTarget, prevH, prevC)
 
-#encoder shouldnt be input it should be hidden state
-    #need to put a start, stop, and pad token in the action and target, make sure it doesnt coincide
-    #make it batchwise
+            currentAction = torch.nn.functional.one_hot(torch.max(predictedAction, 2, True)[1], self.numberOfActions).squeeze().squeeze()
+            currentTarget = torch.nn.functional.one_hot(torch.max(predictedAction, 2, True)[1], self.numberOfTargets).squeeze().squeeze()
+
+            if previousPredictedAction is not None:
+                previousPredictedAction = torch.cat((previousPredictedAction, predictedAction), 0)
+            else:
+                previousPredictedAction = predictedAction
+
+            if previousPredictedTarget is not None:
+                previousPredictedTarget = torch.cat((previousPredictedTarget, predictedTarget), 0)
+            else:
+                previousPredictedTarget = predictedTarget
+
+        return torch.swapaxes(previousPredictedAction, 0, 1), torch.swapaxes(previousPredictedTarget, 0, 1)
+
+    # encoder shouldnt be input it should be hidden state
+    # need to put a start, stop, and pad token in the action and target, make sure it doesnt coincide
+    # make it batchwise
     def getTeacherForcedDecoding(self, encoding, labels):
+        prevH = encoding[0]
+        prevC = encoding[1]
+        actions, targets = torch.split(labels, [1, 1], 2)
+        actions = torch.split(actions, 1, 1)
+        targets = torch.split(targets, 1, 1)
+        currentAction = torch.nn.functional.one_hot(torch.zeros_like(actions[0]).to(torch.int64), self.numberOfActions).squeeze()
+        currentTarget = torch.nn.functional.one_hot(torch.zeros_like(targets[0]).to(torch.int64), self.numberOfTargets).squeeze()
+
+        previousPredictedAction = None
+        previousPredictedTarget = None
+        for i in range(self.maxEpisodeLength):
+            predictedAction, predictedTarget, (prevH, prevC)= self.decoder.forward(currentAction, currentTarget, prevH, prevC)
+
+            currentAction = torch.nn.functional.one_hot(actions[i].to(torch.int64), self.numberOfActions).squeeze()
+            currentTarget = torch.nn.functional.one_hot(targets[i].to(torch.int64), self.numberOfTargets).squeeze()
+
+            if previousPredictedAction is not None:
+                previousPredictedAction = torch.cat((previousPredictedAction, predictedAction), 0)
+            else:
+                previousPredictedAction = predictedAction
+
+            if previousPredictedTarget is not None:
+                previousPredictedTarget = torch.cat((previousPredictedTarget, predictedTarget), 0)
+            else:
+                previousPredictedTarget = predictedTarget
+
+        return torch.swapaxes(previousPredictedAction, 0, 1), torch.swapaxes(previousPredictedTarget, 0, 1)
+        """
         allPredictedActions = None
         allPredictedTarget = None
-        for batchette, partialEncoding in zip(labels, encoding):
-            encodingToPass = partialEncoding
-            prevAction = None
-            prevTarget = None
-            prevH = None
-            prevC = None
+        for batchette, partialEncodingH, partialEncodingC in zip(labels, encoding[0].squeeze(), encoding[1].squeeze()):
+            prevAction = torch.zeros(1)
+            prevTarget = torch.zeros(1)
+            prevH = partialEncodingH.unsqueeze(0)
+            prevC = partialEncodingC.unsqueeze(0)
             previousPredictedAction = None
             previousPredictedTarget = None
             for label in batchette:
-                predictedAction, predictedTarget, (prevH, prevC) = self.decoder.forward(encodingToPass, prevAction,
-                                                                                        prevTarget, prevH, prevC)
+                predictedAction, predictedTarget, (prevH, prevC) = self.decoder.forward(torch.nn.functional.one_hot(prevAction.to(torch.int64), self.numberOfActions),
+                                                                                        torch.nn.functional.one_hot(prevTarget.to(torch.int64), self.numberOfTargets), prevH, prevC)
 
                 if (predictedAction is not None) and (previousPredictedAction is not None):
                     previousPredictedAction = torch.cat((predictedAction, previousPredictedAction), 0)
@@ -171,14 +213,14 @@ class EncoderDecoder(nn.Module):
                 else:
                     previousPredictedTarget = predictedTarget
 
-                encodingToPass = None
-
                 prevAction = label[0]
                 prevTarget = label[1]
 
                 if (prevAction == self.padToken) or (prevTarget == self.padToken):
-                    actionPaddingTensor = torch.full((self.maxEpisodeLength - previousPredictedAction.size(0), self.numberOfActions), self.padToken)
-                    targetPaddingTensor = torch.full((self.maxEpisodeLength - previousPredictedTarget.size(0), self.numberOfTargets), self.padToken)
+                    actionPaddingTensor = torch.full(
+                        (self.maxEpisodeLength - previousPredictedAction.size(0), self.numberOfActions), self.padToken)
+                    targetPaddingTensor = torch.full(
+                        (self.maxEpisodeLength - previousPredictedTarget.size(0), self.numberOfTargets), self.padToken)
                     previousPredictedAction = torch.cat((actionPaddingTensor, previousPredictedAction), 0)
                     previousPredictedTarget = torch.cat((targetPaddingTensor, previousPredictedTarget), 0)
                     break
@@ -191,3 +233,4 @@ class EncoderDecoder(nn.Module):
                 allPredictedTarget = torch.cat((allPredictedTarget, previousPredictedTarget.unsqueeze(0)), 0)
 
         return allPredictedActions, allPredictedTarget
+        """

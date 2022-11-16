@@ -36,6 +36,7 @@ def build_tokenizer_table(train, vocab_size=500):
     padded_lens = []
     inst_count = 0
     maxEpisodeLength = 0
+    max_padded_len = 0
     for episode in train:
         padded_len = 2  # start/end
         episodeLength = 0

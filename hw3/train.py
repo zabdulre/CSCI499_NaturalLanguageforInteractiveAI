@@ -59,16 +59,16 @@ def setup_dataloader(args):
     train_tokens, train_labels = __processTrainingSet__(trainRawData, vocab_to_index, action_to_index, target_to_index,
                                                         startValue, endValue,
                                                         unkValue, padValue, sepValue, maxLength, maxEpisodeLength)
-    train_processed = torch.utils.data.TensorDataset(torch.from_numpy(train_tokens[0:2000]), torch.from_numpy(train_labels[0:2000]))
+    train_processed = torch.utils.data.TensorDataset(torch.from_numpy(train_tokens[:200]), torch.from_numpy(train_labels[:200]))
 
     val_tokens, val_labels = __processTrainingSet__(validateRawData, vocab_to_index, action_to_index, target_to_index,
                                                     startValue, endValue,
                                                     unkValue, padValue, sepValue, maxLength, maxEpisodeLength)
     val_processed = torch.utils.data.TensorDataset(torch.from_numpy(val_tokens), torch.from_numpy(val_labels))
 
-    train_loader = torch.utils.data.DataLoader(train_processed, shuffle=True, batch_size=args.batch_size)
+    train_loader = torch.utils.data.DataLoader(train_processed, shuffle=True, batch_size=args.batch_size, drop_last=True)
     val_loader = torch.utils.data.DataLoader(val_processed,
-                                             shuffle=True, batch_size=args.batch_size)
+                                             shuffle=True, batch_size=args.batch_size, drop_last=True)
 
     return train_loader, val_loader, {"vocab": vocab_to_index, "action": action_to_index, "target": target_to_index,
                                       "maxLength": maxLength, "maxEpisodeLength": maxEpisodeLength, "pad": padValue}
@@ -184,7 +184,8 @@ def train_epoch(
         actionCriterion,
         targetCriterion,
         device,
-        training=True,
+        maps,
+        training=True
 ):
     """
     # TODO: implement function for greedy decoding.
@@ -214,10 +215,10 @@ def train_epoch(
 
         # calculate the loss and train accuracy and perform backprop
         # NOTE: feel free to change the parameters to the model forward pass here + outputs
-        actionOutputs, targetOutputs = model(inputs, labels)
-
-        actionLoss = 0
-        targetLoss = 0
+        if training:
+            actionOutputs, targetOutputs = model(inputs, labels)
+        else:
+            actionOutputs, targetOutputs = model(inputs, labels, False)
 
         actionLabels, targetLabels = torch.split(labels, (1, 1), dim=2)
         actionLoss = actionCriterion(actionOutputs.swapaxes(1, 2), actionLabels.squeeze().long())
@@ -238,20 +239,31 @@ def train_epoch(
         """
         # TODO: add code to log these metrics
         # em = output == labels
-        # prefix_em = prefix_em(output, labels)
-        # acc = 0.0
-
+        prefix_em = utils.prefix_match(torch.cat(actionOutputs, targetOutputs).flatten(), torch.cat(actionLabels, targetLabels).flatten())
+        acc = getAccuracy(torch.cat(actionOutputs, targetOutputs).flatten(), torch.cat(actionLabels, targetLabels).flatten(), maps['pad'])
+        print(prefix_em)
+        print(acc)
         # logging
         epoch_loss += targetLoss.item() + actionLoss.item()
-        epoch_acc += 0.0
+        epoch_acc += acc
 
     epoch_loss /= len(loader)
     epoch_acc /= len(loader)
 
     return epoch_loss, epoch_acc
 
+def getAccuracy(predictedLabels, ogLabels, padToken):
+    correctGuesses = 0.0
+    for x, y in zip(predictedLabels, ogLabels):
+        if y == padToken:
+            continue
+        else:
+            if x == y:
+                correctGuesses += 1
 
-def validate(args, model, loader, optimizer, actionCriterion, targetCriterion, device):
+    return correctGuesses / len(predictedLabels)
+
+def validate(args, model, loader, optimizer, actionCriterion, targetCriterion, device, maps):
     # set model to eval mode
     model.eval()
 
@@ -265,13 +277,14 @@ def validate(args, model, loader, optimizer, actionCriterion, targetCriterion, d
             actionCriterion,
             targetCriterion,
             device,
+            maps,
             training=False,
         )
 
     return val_loss, val_acc
 
 
-def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, device):
+def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, device, maps):
     # Train model for a fixed number of epochs
     # In each epoch we compute loss on each sample in our dataset and update the model
     # weights via backpropagation
@@ -289,6 +302,7 @@ def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, dev
             actionCriterion,
             targetCriterion,
             device,
+            maps
         )
 
         # some logging
@@ -306,6 +320,7 @@ def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, dev
                 actionCriterion,
                 targetCriterion,
                 device,
+                maps
             )
 
             print(f"val loss : {val_loss} | val acc: {val_acc}")
@@ -339,9 +354,10 @@ def main(args):
             optimizer,
             actionCriterion, targetCriterion,
             device,
+            maps
         )
     else:
-        train(args, model, loaders, optimizer, actionCriterion, targetCriterion, device)
+        train(args, model, loaders, optimizer, actionCriterion, targetCriterion, device, maps)
 
 
 if __name__ == "__main__":
