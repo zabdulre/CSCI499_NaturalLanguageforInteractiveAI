@@ -4,6 +4,8 @@ import numpy as np
 import tqdm
 import torch
 import argparse
+
+from matplotlib import pyplot as plt
 from sklearn.metrics import accuracy_score
 
 import utils
@@ -59,14 +61,16 @@ def setup_dataloader(args):
     train_tokens, train_labels = __processTrainingSet__(trainRawData, vocab_to_index, action_to_index, target_to_index,
                                                         startValue, endValue,
                                                         unkValue, padValue, sepValue, maxLength, maxEpisodeLength)
-    train_processed = torch.utils.data.TensorDataset(torch.from_numpy(train_tokens[:200]), torch.from_numpy(train_labels[:200]))
+    train_processed = torch.utils.data.TensorDataset(torch.from_numpy(train_tokens[:20000]),
+                                                     torch.from_numpy(train_labels[:20000]))
 
     val_tokens, val_labels = __processTrainingSet__(validateRawData, vocab_to_index, action_to_index, target_to_index,
                                                     startValue, endValue,
                                                     unkValue, padValue, sepValue, maxLength, maxEpisodeLength)
     val_processed = torch.utils.data.TensorDataset(torch.from_numpy(val_tokens), torch.from_numpy(val_labels))
 
-    train_loader = torch.utils.data.DataLoader(train_processed, shuffle=True, batch_size=args.batch_size, drop_last=True)
+    train_loader = torch.utils.data.DataLoader(train_processed, shuffle=True, batch_size=args.batch_size,
+                                               drop_last=True)
     val_loader = torch.utils.data.DataLoader(val_processed,
                                              shuffle=True, batch_size=args.batch_size, drop_last=True)
 
@@ -86,9 +90,9 @@ def __processTrainingSet__(trainRawData, vocab_to_index, action_to_index, target
         wordIndex = 0
         episodeIndex = 0
         processedTrainData[taskIndex][0] = startValue
-        # processedLabelData[taskIndex][0][0] = startValue
-        # processedLabelData[taskIndex][0][1] = startValue
-        # episodeIndex += 1
+        processedLabelData[taskIndex][0][0] = startValue
+        processedLabelData[taskIndex][0][1] = startValue
+        episodeIndex += 1
         for instance in episode:
             labels = instance[1]
             sentences = instance[0]
@@ -117,10 +121,10 @@ def __processTrainingSet__(trainRawData, vocab_to_index, action_to_index, target
                 processedTrainData[taskIndex][wordIndex] = padValue
                 wordIndex += 1
         if episodeIndex < maxEpisodeLength:
-            #    episodeIndex += 1
-            #      if episodeIndex < maxEpisodeLength:
-            #            processedLabelData[taskIndex][0][0] = endValue
-            #             processedLabelData[taskIndex][0][1] = endValue
+            episodeIndex += 1
+            if episodeIndex < maxEpisodeLength:
+                processedLabelData[taskIndex][0][0] = endValue
+                processedLabelData[taskIndex][0][1] = endValue
             for i in range(maxEpisodeLength - episodeIndex):
                 processedLabelData[taskIndex][episodeIndex][0] = padValue
                 processedLabelData[taskIndex][episodeIndex][1] = padValue
@@ -205,8 +209,12 @@ def train_epoch(
 
     global prefix_em
     epoch_loss = 0.0
+    epoch_action_loss = 0.0
+    epoch_target_loss = 0.0
     epoch_acc = 0.0
-
+    epoch_prefix = 0.0
+    numberOfCalc = 0
+    i = 0
     # iterate over each batch in the dataloader
     # NOTE: you may have additional outputs from the loader __getitem__, you can modify this
     for (inputs, labels) in loader:
@@ -237,31 +245,49 @@ def train_epoch(
         # exact match and prefix exact match. You can also try to compute longest common subsequence.
         # Feel free to change the input to these functions.
         """
-        # TODO: add code to log these metrics
+        # TODO: add code to log these metrics and add start and pad token
         # em = output == labels
-        prefix_em = utils.prefix_match(torch.cat(actionOutputs, targetOutputs).flatten(), torch.cat(actionLabels, targetLabels).flatten())
-        acc = getAccuracy(torch.cat(actionOutputs, targetOutputs).flatten(), torch.cat(actionLabels, targetLabels).flatten(), maps['pad'])
-        print(prefix_em)
-        print(acc)
+        if i % 10 == 0:
+            #actionOutputs.scatter_(2, torch.full((actionOutputs.size(0), actionOutputs.size(1), 1), maps['pad'], dtype=torch.int64), torch.full((actionOutputs.size(0), actionOutputs.size(1), 1), -1000000, dtype=torch.float))
+            #targetOutputs.scatter_(2, torch.full((targetOutputs.size(0), targetOutputs.size(1), 1), maps['pad'], dtype=torch.int64), torch.full((targetOutputs.size(0), targetOutputs.size(1), 1), -1000000, dtype=torch.float))
+            actionOutputs = torch.max(actionOutputs, 2, True)[1]
+            targetOutputs = torch.max(targetOutputs, 2, True)[1]
+            prefix_em = utils.prefix_match(torch.cat((actionOutputs, targetOutputs), 2).flatten(), torch.cat((actionLabels, targetLabels), 2).flatten())
+            acc = getAccuracy(torch.cat((actionOutputs, targetOutputs), 2).flatten(),
+                              torch.cat((actionLabels, targetLabels), 2).flatten(), maps['pad'])
+            print("prefix_em: " + str(prefix_em))
+            print("accuracy: " + str(acc))
+            epoch_acc += acc
+            epoch_prefix += prefix_em
+            numberOfCalc += 1
         # logging
         epoch_loss += targetLoss.item() + actionLoss.item()
-        epoch_acc += acc
+        epoch_target_loss += targetLoss.item()
+        epoch_action_loss += actionLoss.item()
 
+        i += 1
+    epoch_target_loss /= len(loader)
+    epoch_action_loss /= len(loader)
     epoch_loss /= len(loader)
-    epoch_acc /= len(loader)
+    epoch_acc /= numberOfCalc
+    epoch_prefix /= numberOfCalc
 
-    return epoch_loss, epoch_acc
+    return epoch_action_loss, epoch_target_loss, epoch_acc, epoch_prefix
+
 
 def getAccuracy(predictedLabels, ogLabels, padToken):
-    correctGuesses = 0.0
+    correctGuesses = float(0)
+    numberOfItems = 0
     for x, y in zip(predictedLabels, ogLabels):
-        if y == padToken:
+        if y.item() == padToken:
             continue
         else:
-            if x == y:
+            numberOfItems += 1
+            if x.item() == y.item():
                 correctGuesses += 1
 
-    return correctGuesses / len(predictedLabels)
+    return correctGuesses / numberOfItems
+
 
 def validate(args, model, loader, optimizer, actionCriterion, targetCriterion, device, maps):
     # set model to eval mode
@@ -269,7 +295,7 @@ def validate(args, model, loader, optimizer, actionCriterion, targetCriterion, d
 
     # don't compute gradients
     with torch.no_grad():
-        val_loss, val_acc = train_epoch(
+        epoch_action_loss, epoch_target_loss, epoch_acc, epoch_prefix = train_epoch(
             args,
             model,
             loader,
@@ -281,20 +307,25 @@ def validate(args, model, loader, optimizer, actionCriterion, targetCriterion, d
             training=False,
         )
 
-    return val_loss, val_acc
+    return epoch_action_loss, epoch_target_loss, epoch_acc, epoch_prefix
 
 
 def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, device, maps):
     # Train model for a fixed number of epochs
     # In each epoch we compute loss on each sample in our dataset and update the model
     # weights via backpropagation
+    action = {"trainingLoss":[], "trainingAcc":[], "valLoss":[], "valAcc":[]}
+    target = {"trainingLoss":[], "trainingPrefix":[], "valLoss":[], "valPrefix":[]}
+    x = []
+    valx = []
+
     model.train()
 
     for epoch in tqdm.tqdm(range(args.num_epochs)):
 
         # train single epoch
         # returns loss for action and target prediction and accuracy
-        train_loss, train_acc = train_epoch(
+        train_action_loss, train_target_loss, train_accuracy, train_prefix = train_epoch(
             args,
             model,
             loaders["train"],
@@ -306,13 +337,13 @@ def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, dev
         )
 
         # some logging
-        print(f"train loss : {train_loss}")
+        print(f"train action loss : {train_action_loss} | train target loss : {train_target_loss} | train overall acc: {train_accuracy} | train prefix match: {train_prefix}")
 
         # run validation every so often
         # during eval, we run a forward pass through the model and compute
         # loss and accuracy but we don't update the model weights
         if epoch % args.val_every == 0:
-            val_loss, val_acc = validate(
+            val_action_loss, val_target_loss, val_accuracy, val_prefix = validate(
                 args,
                 model,
                 loaders["val"],
@@ -323,13 +354,50 @@ def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, dev
                 maps
             )
 
-            print(f"val loss : {val_loss} | val acc: {val_acc}")
+            print(f"val action loss : {val_action_loss} | val target loss : {val_target_loss} | val overall acc: {val_accuracy} | val prefix match: {val_prefix}")
+
+            valx.append(epoch)
+            action["valLoss"].append(val_action_loss)
+            action["valAcc"].append(val_accuracy)
+            target["valLoss"].append(val_target_loss)
+            target["valPrefix"].append(val_prefix)
 
     # ================== TODO: CODE HERE ================== #
     # Task: Implement some code to keep track of the model training and
     # evaluation loss. Use the matplotlib library to plot
-    # 3 figures for 1) training loss, 2) validation loss, 3) validation accuracy
+    # 4 figures for 1) training loss, 2) training accuracy,
+    # 3) validation loss, 4) validation accuracy
     # ===================================================== #
+        action["trainingLoss"].append(train_action_loss)
+        action["trainingAcc"].append(train_accuracy)
+        target["trainingLoss"].append(train_action_loss)
+        target["trainingPrefix"].append(train_prefix)
+
+        x.append(epoch)
+
+    plt.title("Action: loss performance")
+    plt.plot(x, action["trainingLoss"], label = "action training loss")
+    plt.plot(valx, action["valLoss"], label = "action validation set loss")
+    plt.legend()
+    plt.show()
+
+    plt.title("Target: loss performance")
+    plt.plot(x, target["trainingLoss"], label = "target training loss")
+    plt.plot(valx, target["valLoss"], label = "target validation loss")
+    plt.legend()
+    plt.show()
+
+    plt.title("Accuracy performance")
+    plt.plot(x, action["trainingAcc"], label = "training accuracy")
+    plt.plot(valx, action["valAcc"], label = "validation accuracy")
+    plt.legend()
+    plt.show()
+
+    plt.title("Prefix Performance")
+    plt.plot(x, target["trainingPrefix"], label = "training prefix")
+    plt.plot(valx, target["valPrefix"], label = "validation prefix")
+    plt.legend()
+    plt.show()
 
 
 def main(args):

@@ -2,7 +2,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-
+import gensim.downloader
 
 class Encoder(nn.Module):
     """
@@ -17,6 +17,8 @@ class Encoder(nn.Module):
         self.encoderHiddenSize = encoderHIddenSize
         self.batchSize = batchSize
         self.embedding = nn.Embedding(vocabSize, self.embeddingSize, padding_idx=padIdx)
+        #self.embedding = gensim.downloader.load('word2vec-google-news-300')
+        #self.embeddingSize = 300
         self.lstm = nn.LSTM(self.embeddingSize, encoderHIddenSize, batch_first=True)
 
     def forward(self, word, h, c):
@@ -144,7 +146,7 @@ class EncoderDecoder(nn.Module):
             predictedAction, predictedTarget, (prevH, prevC)= self.decoder.forward(currentAction, currentTarget, prevH, prevC)
 
             currentAction = torch.nn.functional.one_hot(torch.max(predictedAction, 2, True)[1], self.numberOfActions).squeeze().squeeze()
-            currentTarget = torch.nn.functional.one_hot(torch.max(predictedAction, 2, True)[1], self.numberOfTargets).squeeze().squeeze()
+            currentTarget = torch.nn.functional.one_hot(torch.max(predictedTarget, 2, True)[1], self.numberOfTargets).squeeze().squeeze()
 
             if previousPredictedAction is not None:
                 previousPredictedAction = torch.cat((previousPredictedAction, predictedAction), 0)
