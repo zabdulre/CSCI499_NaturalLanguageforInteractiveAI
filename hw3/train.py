@@ -61,8 +61,8 @@ def setup_dataloader(args):
     train_tokens, train_labels = __processTrainingSet__(trainRawData, vocab_to_index, action_to_index, target_to_index,
                                                         startValue, endValue,
                                                         unkValue, padValue, sepValue, maxLength, maxEpisodeLength)
-    train_processed = torch.utils.data.TensorDataset(torch.from_numpy(train_tokens[:20000]),
-                                                     torch.from_numpy(train_labels[:20000]))
+    train_processed = torch.utils.data.TensorDataset(torch.from_numpy(train_tokens),
+                                                     torch.from_numpy(train_labels))
 
     val_tokens, val_labels = __processTrainingSet__(validateRawData, vocab_to_index, action_to_index, target_to_index,
                                                     startValue, endValue,
@@ -158,8 +158,8 @@ def setup_model(args, maps, device):
     # ===================================================== #
     vocab = maps["vocab"]
     model = EncoderDecoder(args.batch_size, maps["maxLength"], len(maps["vocab"]), args.embedding_size,
-                           maps['maxEpisodeLength'], args.decoder_size, len(maps['action']), len(maps['target']),
-                           args.encoder_size, vocab['<end>'], vocab['<pad>'])
+                           maps['maxEpisodeLength'], len(maps['action']), len(maps['target']),
+                           args.encoder_size, vocab['<end>'], vocab['<pad>'], args.transformer)
     return model
 
 
@@ -211,7 +211,8 @@ def train_epoch(
     epoch_loss = 0.0
     epoch_action_loss = 0.0
     epoch_target_loss = 0.0
-    epoch_acc = 0.0
+    epoch_action_acc = 0.0
+    epoch_target_acc = 0.0
     epoch_prefix = 0.0
     numberOfCalc = 0
     i = 0
@@ -253,11 +254,15 @@ def train_epoch(
             actionOutputs = torch.max(actionOutputs, 2, True)[1]
             targetOutputs = torch.max(targetOutputs, 2, True)[1]
             prefix_em = utils.prefix_match(torch.cat((actionOutputs, targetOutputs), 2).flatten(), torch.cat((actionLabels, targetLabels), 2).flatten())
-            acc = getAccuracy(torch.cat((actionOutputs, targetOutputs), 2).flatten(),
-                              torch.cat((actionLabels, targetLabels), 2).flatten(), maps['pad'])
+            actionAcc = getAccuracy(actionOutputs.flatten(),
+                              actionLabels.flatten(), maps['pad'])
+            targetAcc = getAccuracy(targetOutputs.flatten(),
+                              targetLabels.flatten(), maps['pad'])
             print("prefix_em: " + str(prefix_em))
-            print("accuracy: " + str(acc))
-            epoch_acc += acc
+            print("Action accuracy: " + str(actionAcc))
+            print("Target accuracy: " + str(targetAcc))
+            epoch_action_acc += actionAcc
+            epoch_target_acc += targetAcc
             epoch_prefix += prefix_em
             numberOfCalc += 1
         # logging
@@ -269,10 +274,11 @@ def train_epoch(
     epoch_target_loss /= len(loader)
     epoch_action_loss /= len(loader)
     epoch_loss /= len(loader)
-    epoch_acc /= numberOfCalc
+    epoch_action_acc /= numberOfCalc
+    epoch_target_acc /= numberOfCalc
     epoch_prefix /= numberOfCalc
 
-    return epoch_action_loss, epoch_target_loss, epoch_acc, epoch_prefix
+    return epoch_action_loss, epoch_target_loss, epoch_action_acc, epoch_target_acc, epoch_prefix
 
 
 def getAccuracy(predictedLabels, ogLabels, padToken):
@@ -295,7 +301,7 @@ def validate(args, model, loader, optimizer, actionCriterion, targetCriterion, d
 
     # don't compute gradients
     with torch.no_grad():
-        epoch_action_loss, epoch_target_loss, epoch_acc, epoch_prefix = train_epoch(
+        epoch_action_loss, epoch_target_loss, epoch_action_acc, epoch_target_acc, epoch_prefix = train_epoch(
             args,
             model,
             loader,
@@ -307,7 +313,7 @@ def validate(args, model, loader, optimizer, actionCriterion, targetCriterion, d
             training=False,
         )
 
-    return epoch_action_loss, epoch_target_loss, epoch_acc, epoch_prefix
+    return epoch_action_loss, epoch_target_loss, epoch_action_acc, epoch_target_acc, epoch_prefix
 
 
 def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, device, maps):
@@ -315,7 +321,7 @@ def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, dev
     # In each epoch we compute loss on each sample in our dataset and update the model
     # weights via backpropagation
     action = {"trainingLoss":[], "trainingAcc":[], "valLoss":[], "valAcc":[]}
-    target = {"trainingLoss":[], "trainingPrefix":[], "valLoss":[], "valPrefix":[]}
+    target = {"trainingLoss":[], "trainingPrefix":[], "valLoss":[], "valPrefix":[], "trainingAcc":[],"valAcc":[] }
     x = []
     valx = []
 
@@ -325,7 +331,7 @@ def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, dev
 
         # train single epoch
         # returns loss for action and target prediction and accuracy
-        train_action_loss, train_target_loss, train_accuracy, train_prefix = train_epoch(
+        train_action_loss, train_target_loss, train_action_accuracy, train_target_accuracy, train_prefix = train_epoch(
             args,
             model,
             loaders["train"],
@@ -337,13 +343,13 @@ def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, dev
         )
 
         # some logging
-        print(f"train action loss : {train_action_loss} | train target loss : {train_target_loss} | train overall acc: {train_accuracy} | train prefix match: {train_prefix}")
+        print(f"train action loss : {train_action_loss} | train target loss : {train_target_loss} | train action acc: {train_action_accuracy} | train target acc: {train_target_accuracy} | train prefix match: {train_prefix}")
 
         # run validation every so often
         # during eval, we run a forward pass through the model and compute
         # loss and accuracy but we don't update the model weights
         if epoch % args.val_every == 0:
-            val_action_loss, val_target_loss, val_accuracy, val_prefix = validate(
+            val_action_loss, val_target_loss, val_action_acc, val_target_acc, val_prefix = validate(
                 args,
                 model,
                 loaders["val"],
@@ -354,12 +360,13 @@ def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, dev
                 maps
             )
 
-            print(f"val action loss : {val_action_loss} | val target loss : {val_target_loss} | val overall acc: {val_accuracy} | val prefix match: {val_prefix}")
+            print(f"val action loss : {val_action_loss} | val target loss : {val_target_loss} | val action acc: {val_action_acc} | val target acc: {val_target_acc} | val prefix match: {val_prefix}")
 
             valx.append(epoch)
             action["valLoss"].append(val_action_loss)
-            action["valAcc"].append(val_accuracy)
+            action["valAcc"].append(val_action_acc)
             target["valLoss"].append(val_target_loss)
+            target["valAcc"].append(val_target_acc)
             target["valPrefix"].append(val_prefix)
 
     # ================== TODO: CODE HERE ================== #
@@ -369,8 +376,9 @@ def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, dev
     # 3) validation loss, 4) validation accuracy
     # ===================================================== #
         action["trainingLoss"].append(train_action_loss)
-        action["trainingAcc"].append(train_accuracy)
+        action["trainingAcc"].append(train_action_accuracy)
         target["trainingLoss"].append(train_action_loss)
+        target["trainingAcc"].append(train_target_accuracy)
         target["trainingPrefix"].append(train_prefix)
 
         x.append(epoch)
@@ -387,9 +395,15 @@ def train(args, model, loaders, optimizer, actionCriterion, targetCriterion, dev
     plt.legend()
     plt.show()
 
-    plt.title("Accuracy performance")
+    plt.title("Action: Accuracy performance")
     plt.plot(x, action["trainingAcc"], label = "training accuracy")
     plt.plot(valx, action["valAcc"], label = "validation accuracy")
+    plt.legend()
+    plt.show()
+
+    plt.title("Target: Accuracy performance")
+    plt.plot(x, target["trainingAcc"], label = "training accuracy")
+    plt.plot(valx, target["valAcc"], label = "validation accuracy")
     plt.legend()
     plt.show()
 
@@ -415,7 +429,7 @@ def main(args):
     actionCriterion, targetCriterion, optimizer = setup_optimizer(args, model, maps)
 
     if args.eval:
-        val_loss, val_acc = validate(
+        validate(
             args,
             model,
             loaders["val"],
@@ -444,13 +458,11 @@ if __name__ == "__main__":
         "--embedding_size", type=int, default=32, help="size of the encoder embeddings"
     )
     parser.add_argument(
-        "--decoder_size", type=int, default=32, help="size of the decoder hidden size"
-    )
-    parser.add_argument(
         "--encoder_size", type=int, default=32, help="size of the decoder hidden size"
     )
     parser.add_argument("--force_cpu", action="store_true", help="debug mode")
     parser.add_argument("--eval", action="store_true", help="run eval")
+    parser.add_argument("--transformer", action="store_true", help="Use a transformer encoder")
     parser.add_argument("--num_epochs", type=int, default=1000, help="number of training epochs")
     parser.add_argument(
         "--val_every", default=5, type=int, help="number of epochs between every eval loop"

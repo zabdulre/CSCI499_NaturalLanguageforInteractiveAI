@@ -11,12 +11,18 @@ class Encoder(nn.Module):
     TODO: edit the forward pass arguments to suit your needs
     """
 
-    def __init__(self, vocabSize, embeddingSize, encoderHIddenSize, batchSize, padIdx):
+    def __init__(self, vocabSize, embeddingSize, encoderHIddenSize, batchSize, padIdx, m, transformer):
         super().__init__()
-        self.embeddingSize = int(embeddingSize / 2) * 2  # round up to the next even number
+        self.transformer = transformer
         self.encoderHiddenSize = encoderHIddenSize
         self.batchSize = batchSize
-        self.embedding = nn.Embedding(vocabSize, self.embeddingSize, padding_idx=padIdx)
+        #self.embedding = nn.Embedding(vocabSize, self.embeddingSize, padding_idx=padIdx)
+        if self.transformer:
+            self.embedding = torch.nn.TransformerEncoder(torch.nn.TransformerEncoderLayer(d_model=m, nhead=1, batch_first=True), 1)
+            self.embeddingSize = 1
+        else:
+            self.embeddingSize = int(embeddingSize / 2) * 2  # round up to the next even number
+            self.embedding = torch.nn.Embedding(vocabSize, self.embeddingSize, padding_idx=padIdx)
         #self.embedding = gensim.downloader.load('word2vec-google-news-300')
         #self.embeddingSize = 300
         self.lstm = nn.LSTM(self.embeddingSize, encoderHIddenSize, batch_first=True)
@@ -26,7 +32,10 @@ class Encoder(nn.Module):
             h = torch.zeros((1, word.size(0), self.encoderHiddenSize))
             c = torch.zeros((1, word.size(0), self.encoderHiddenSize))
 
-        embedding = self.embedding(word)
+        if self.transformer:
+            embedding = self.embedding(word.to(torch.float)).unsqueeze(-1)
+        else:
+            embedding = self.embedding(word)
         # embedding = torch.unsqueeze(embedding, 0)
         output, (x, y) = self.lstm(embedding, (h, c))
         return output, (x, y)
@@ -88,8 +97,8 @@ class EncoderDecoder(nn.Module):
     TODO: edit the forward pass arguments to suit your needs
     """
 
-    def __init__(self, batch_size, max_length, vocabSize, embeddingSize, maxEpisodeLength, decoderHiddenSize,
-                 numberOfActions, numberOfTargets, encoderHiddenSize, endToken, padToken):
+    def __init__(self, batch_size, max_length, vocabSize, embeddingSize, maxEpisodeLength,
+                 numberOfActions, numberOfTargets, encoderHiddenSize, endToken, padToken, isTransformerEncoder):
         super().__init__()
         self.endToken = endToken
         self.padToken = padToken
@@ -97,7 +106,7 @@ class EncoderDecoder(nn.Module):
         self.batchSize = batch_size
         self.numberOfActions = numberOfActions
         self.numberOfTargets = numberOfTargets
-        self.encoder = Encoder(vocabSize, embeddingSize, encoderHiddenSize, batch_size, padToken)
+        self.encoder = Encoder(vocabSize, embeddingSize, encoderHiddenSize, batch_size, padToken, max_length, transformer=isTransformerEncoder)
         self.decoder = Decoder(batch_size, max_length, maxEpisodeLength, encoderHiddenSize,
                                numberOfActions, numberOfTargets, vocabSize, padToken)
 
